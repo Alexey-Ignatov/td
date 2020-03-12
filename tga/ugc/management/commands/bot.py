@@ -48,6 +48,7 @@ def do_echo(update: Update, context: CallbackContext):
     update.message.reply_text(
         text=reply_text,
     )
+    update.message
 
 
 @log_errors

@@ -112,11 +112,13 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 
-STATIC_ROOT = '/home/www/td/static/'
+STATIC_ROOT = '/root/td/static/'
 
 
 # Настройки бота
 
-TOKEN = '855883347:AAH9ikaPCy1R2GoqbhmCGilhFmqLczcUFAY'
+TOKEN = '933432063:AAEEpMlhBXxveo6U-OBwX8p187als-1BesA'
 
 # PROXY_URL = 'https://telegg.ru/orig/bot'
+
+
