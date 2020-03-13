@@ -1,14 +1,13 @@
 [Unit]
-Description=Django Admin daemon
+Description=gunicorn daemon
 After=network.target
 
 [Service]
-User=www
-Group=www
+User=root
+Group=www-data
 WorkingDirectory=/home/www/td/tga/tga
 Environment="PYTHONPATH=/home/www/td/tga"
-ExecStart=/home/www/td/venv/bin/gunicorn --workers 2 --bind unix:/home/www/run/tgadmin.sock wsgi:application
-Restart=on-failure
+ExecStart=/home/www/td/venv/bin/gunicorn  --access-logfile - --workers 3 --bind=unix:/home/www/run/tgadmin.sock wsgi:application
 
 [Install]
 WantedBy=multi-user.target
