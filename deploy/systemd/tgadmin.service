@@ -5,8 +5,8 @@ After=network.target
 [Service]
 User=www
 Group=www
-WorkingDirectory=/home/www/td/tga/tga
-Environment="PYTHONPATH=/home/www/td/tga"
+WorkingDirectory=/root/td/tga/tga
+Environment="PYTHONPATH=/root/td/tga"
 ExecStart=/root/td/venv/bin/gunicorn --workers 2 --bind unix:/root/run/tgadmin.sock wsgi:application
 Restart=on-failure
 
