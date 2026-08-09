@@ -53,11 +53,19 @@ def resolve_token(explicit):
     sys.exit('Не найден токен бота: задайте $TELEGRAM_BOT_TOKEN или передайте --token.')
 
 
-def resolve_chat_id(explicit):
+def resolve_chat_id(explicit, token):
     chat_id = explicit or os.environ.get('TELEGRAM_CHAT_ID')
-    if not chat_id:
-        sys.exit('Не найден chat id: задайте $TELEGRAM_CHAT_ID или передайте --chat-id.')
-    return chat_id
+    if chat_id:
+        return chat_id
+    # Фолбэк: берём чат из последних апдейтов — достаточно один раз написать боту.
+    # Работает только если бот не запущен на polling, иначе апдейты уже забраны.
+    for update in reversed(api_call(token, 'getUpdates', {'limit': 20}).get('result', [])):
+        chat = (update.get('message') or {}).get('chat') or {}
+        if chat.get('id'):
+            print(f'chat id не задан, взят из последних апдейтов: {chat["id"]}')
+            return str(chat['id'])
+    sys.exit('Не найден chat id: задайте $TELEGRAM_CHAT_ID, передайте --chat-id '
+             'или напишите боту любое сообщение и повторите.')
 
 
 def api_call(token, method, payload=None, attempts=4):
@@ -91,7 +99,11 @@ def api_call(token, method, payload=None, attempts=4):
         if attempt < attempts:
             time.sleep(delay)
             delay *= 2
-    raise SystemExit(f'Не удалось вызвать {method} после {attempts} попыток: {last_error}')
+    hint = ''
+    if '403' in str(last_error) and os.environ.get('HTTPS_PROXY'):
+        hint = ('\nПохоже, исходящий прокси окружения не пускает api.telegram.org. '
+                'Разрешите этот домен в network policy окружения Claude Code.')
+    raise SystemExit(f'Не удалось вызвать {method} после {attempts} попыток: {last_error}{hint}')
 
 
 def markdown_to_html(text):
@@ -215,7 +227,7 @@ def main():
     if not args.path:
         parser.error('нужен путь к файлу отчёта (или "-" для stdin)')
 
-    chat_id = resolve_chat_id(args.chat_id)
+    chat_id = resolve_chat_id(args.chat_id, token)
     text = sys.stdin.read() if args.path == '-' else open(args.path, encoding='utf-8').read()
     text = text.strip()
     if not text:
