@@ -4,14 +4,22 @@
 Зависимостей нет — только стандартная библиотека. Прокси и CA-бандл берутся
 из окружения (https_proxy / SSL_CERT_FILE), как это делает urllib по умолчанию.
 
+Ботов может быть несколько, поэтому переменные окружения именованы по боту:
+у бота NAME это TELEGRAM_<NAME>_BOT_TOKEN и TELEGRAM_<NAME>_CHAT_ID. Какой
+бот использовать, задаёт --bot (по умолчанию weekly_report) или $TELEGRAM_BOT.
+Общих TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID намеренно нет: с несколькими
+ботами такой фолбэк однажды отправит отчёт не туда.
+
 Примеры:
 
     python3 tools/send_telegram_report.py report.md
     cat report.md | python3 tools/send_telegram_report.py -
+    python3 tools/send_telegram_report.py report.md --bot alerts
     python3 tools/send_telegram_report.py report.md --chat-id 123456789
+    python3 tools/send_telegram_report.py --list-bots
 
-Токен ищется в таком порядке: --token, $TELEGRAM_BOT_TOKEN, TOKEN из
-tga/tga/settings.py. Chat id: --chat-id, $TELEGRAM_CHAT_ID.
+Токен ищется так: --token, затем TELEGRAM_<NAME>_BOT_TOKEN. Chat id:
+--chat-id, затем TELEGRAM_<NAME>_CHAT_ID, затем последние апдейты бота.
 Узнать свой chat id можно, написав боту любое сообщение — он отвечает
 «Ваш ID = ...» (см. ugc/management/commands/bot.py), либо запустив этот
 скрипт с флагом --whoami.
@@ -33,28 +41,44 @@ API = 'https://api.telegram.org'
 # Telegram режет сообщения на 4096 символах, оставляем запас на служебный префикс.
 CHUNK_LIMIT = 3800
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SETTINGS_PATH = os.path.join(REPO_ROOT, 'tga', 'tga', 'settings.py')
+DEFAULT_BOT = 'weekly_report'
+
+TOKEN_SUFFIX = '_BOT_TOKEN'
+CHAT_SUFFIX = '_CHAT_ID'
 
 
-def resolve_token(explicit):
+def env_names(bot):
+    """Имена переменных окружения для конкретного бота."""
+    slug = re.sub(r'[^A-Z0-9]+', '_', bot.upper()).strip('_')
+    if not slug:
+        sys.exit(f'Некорректное имя бота: {bot!r}.')
+    return f'TELEGRAM_{slug}{TOKEN_SUFFIX}', f'TELEGRAM_{slug}{CHAT_SUFFIX}'
+
+
+def known_bots():
+    """Имена ботов, для которых в окружении есть токен."""
+    found = []
+    for key in os.environ:
+        if key.startswith('TELEGRAM_') and key.endswith(TOKEN_SUFFIX):
+            found.append(key[len('TELEGRAM_'):-len(TOKEN_SUFFIX)].lower())
+    return sorted(found)
+
+
+def resolve_token(explicit, bot):
     if explicit:
         return explicit
-    env = os.environ.get('TELEGRAM_BOT_TOKEN')
-    if env:
-        return env
-    try:
-        with open(SETTINGS_PATH, encoding='utf-8') as f:
-            m = re.search(r'^TOKEN\s*=\s*[\'"]([^\'"]+)[\'"]', f.read(), re.M)
-    except OSError:
-        m = None
-    if m:
-        return m.group(1)
-    sys.exit('Не найден токен бота: задайте $TELEGRAM_BOT_TOKEN или передайте --token.')
+    token_var, _ = env_names(bot)
+    token = os.environ.get(token_var)
+    if token:
+        return token
+    available = known_bots()
+    hint = f' Настроенные боты: {", ".join(available)}.' if available else ''
+    sys.exit(f'Не найден токен бота {bot!r}: задайте ${token_var} или передайте --token.{hint}')
 
 
-def resolve_chat_id(explicit, token):
-    chat_id = explicit or os.environ.get('TELEGRAM_CHAT_ID')
+def resolve_chat_id(explicit, bot, token):
+    _, chat_var = env_names(bot)
+    chat_id = explicit or os.environ.get(chat_var)
     if chat_id:
         return chat_id
     # Фолбэк: берём чат из последних апдейтов — достаточно один раз написать боту.
@@ -64,7 +88,7 @@ def resolve_chat_id(explicit, token):
         if chat.get('id'):
             print(f'chat id не задан, взят из последних апдейтов: {chat["id"]}')
             return str(chat['id'])
-    sys.exit('Не найден chat id: задайте $TELEGRAM_CHAT_ID, передайте --chat-id '
+    sys.exit(f'Не найден chat id для бота {bot!r}: задайте ${chat_var}, передайте --chat-id '
              'или напишите боту любое сообщение и повторите.')
 
 
@@ -190,14 +214,28 @@ def split_chunks(text, limit=CHUNK_LIMIT):
 def main():
     parser = argparse.ArgumentParser(description='Отправить markdown-отчёт в Telegram.')
     parser.add_argument('path', nargs='?', help='Файл с отчётом, "-" — читать stdin.')
-    parser.add_argument('--token', help='Токен бота (по умолчанию $TELEGRAM_BOT_TOKEN).')
-    parser.add_argument('--chat-id', help='Chat id получателя (по умолчанию $TELEGRAM_CHAT_ID).')
+    parser.add_argument('--bot', default=os.environ.get('TELEGRAM_BOT', DEFAULT_BOT),
+                        help='Имя бота: берутся TELEGRAM_<NAME>_BOT_TOKEN и '
+                             f'TELEGRAM_<NAME>_CHAT_ID (по умолчанию {DEFAULT_BOT}).')
+    parser.add_argument('--token', help='Токен бота вместо переменной окружения.')
+    parser.add_argument('--chat-id', help='Chat id получателя вместо переменной окружения.')
+    parser.add_argument('--list-bots', action='store_true',
+                        help='Показать ботов, настроенных в окружении, и выйти.')
     parser.add_argument('--plain', action='store_true', help='Слать как есть, без разметки.')
     parser.add_argument('--dry-run', action='store_true',
                         help='Показать разбивку на сообщения и не отправлять.')
     parser.add_argument('--whoami', action='store_true',
                         help='Показать getMe и chat id из последних апдейтов и выйти.')
     args = parser.parse_args()
+
+    if args.list_bots:
+        for name in known_bots():
+            token_var, chat_var = env_names(name)
+            chat = os.environ.get(chat_var) or 'chat id не задан'
+            print(f'{name}: {token_var} задан, {chat}')
+        if not known_bots():
+            print('В окружении нет ни одной переменной TELEGRAM_<NAME>_BOT_TOKEN.')
+        return
 
     if args.dry_run:
         if not args.path:
@@ -210,7 +248,7 @@ def main():
             print(chunk)
         return
 
-    token = resolve_token(args.token)
+    token = resolve_token(args.token, args.bot)
 
     if args.whoami:
         me = api_call(token, 'getMe')
@@ -227,7 +265,7 @@ def main():
     if not args.path:
         parser.error('нужен путь к файлу отчёта (или "-" для stdin)')
 
-    chat_id = resolve_chat_id(args.chat_id, token)
+    chat_id = resolve_chat_id(args.chat_id, args.bot, token)
     text = sys.stdin.read() if args.path == '-' else open(args.path, encoding='utf-8').read()
     text = text.strip()
     if not text:
