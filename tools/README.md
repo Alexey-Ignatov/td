@@ -4,8 +4,20 @@
 отложенная задача Claude Code (Routine), которая запускается по воскресеньям
 утром, ищет события на неделю вперёд по брифу
 [`weekly_report_prompt.md`](weekly_report_prompt.md), складывает результат в
-файл и вызывает скрипт отсюда. Код в репозитории отвечает только за отправку
-готового текста в Telegram.
+файл и вызывает скрипты отсюда. Код в репозитории отвечает только за рендер и
+отправку готового отчёта.
+
+Поиск событий идёт через MCP-коннектор Bright Data (`mcp__bd__*`) — он
+подключён к самой задаче, отдельного кода и сетевых разрешений не требует:
+трафик коннектора идёт через серверы Anthropic, а не через сеть сессии.
+
+В чат уходит PDF, а не текст:
+
+* [`render_report_pdf.py`](render_report_pdf.py) — markdown в PDF через
+  headless Chromium, который уже стоит в окружении. Кириллица берётся из
+  DejaVu Sans, внешних библиотек не нужно.
+* [`send_telegram_report.py`](send_telegram_report.py) — отправка. С `--as-pdf`
+  сам рендерит и шлёт документом, подпись берёт из заголовка отчёта.
 
 ## Переменные окружения: по паре на каждого бота
 
@@ -58,10 +70,18 @@ python3 tools/send_telegram_report.py --list-bots
 python3 tools/send_telegram_report.py --whoami
 python3 tools/send_telegram_report.py --whoami --bot alerts
 
-# посмотреть, как отчёт разобьётся на сообщения, ничего не отправляя
-python3 tools/send_telegram_report.py report.md --dry-run
+# отправить отчёт PDF-файлом (основной режим)
+python3 tools/send_telegram_report.py report.md --as-pdf
 
-# отправить
+# отправить уже готовый файл
+python3 tools/send_telegram_report.py --document /tmp/report.pdf --caption "План недели"
+
+# собрать PDF, ничего не отправляя
+python3 tools/render_report_pdf.py report.md -o /tmp/report.pdf
+python3 tools/render_report_pdf.py report.md --html-only   # посмотреть вёрстку
+
+# текстом, как раньше: посмотреть разбивку и отправить
+python3 tools/send_telegram_report.py report.md --dry-run
 python3 tools/send_telegram_report.py report.md
 python3 tools/send_telegram_report.py report.md --bot alerts
 cat report.md | python3 tools/send_telegram_report.py -

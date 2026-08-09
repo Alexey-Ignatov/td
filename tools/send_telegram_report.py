@@ -26,15 +26,20 @@
 """
 
 import argparse
+import datetime
 import html
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import render_report_pdf  # noqa: E402  (лежит рядом, не пакет)
 
 API = 'https://api.telegram.org'
 
@@ -90,6 +95,86 @@ def resolve_chat_id(explicit, bot, token):
             return str(chat['id'])
     sys.exit(f'Не найден chat id для бота {bot!r}: задайте ${chat_var}, передайте --chat-id '
              'или напишите боту любое сообщение и повторите.')
+
+
+def report_title(markdown):
+    """Заголовок H1 отчёта — идёт подписью к файлу."""
+    for line in markdown.split('\n'):
+        heading = re.match(r'^#\s+(.*)$', line.strip())
+        if heading:
+            return re.sub(r'[*`]', '', heading.group(1)).strip()
+    return 'Отчёт'
+
+
+def pdf_filename(markdown):
+    """Имя файла: его видно в чате, поэтому с датой и по-человечески."""
+    stamp = datetime.date.today().isoformat()
+    return f'plan-nedeli-{stamp}.pdf'
+
+
+def send_document(token, chat_id, file_path, caption=None):
+    fields = {'chat_id': str(chat_id)}
+    if caption:
+        # У подписи к документу лимит 1024 символа.
+        fields['caption'] = inline_to_html(caption)[:1024]
+        fields['parse_mode'] = 'HTML'
+    api_upload(token, 'sendDocument', fields, 'document', file_path)
+    size = os.path.getsize(file_path) // 1024
+    print(f'Отправлен файл {os.path.basename(file_path)} ({size} КБ) в чат {chat_id}')
+
+
+def api_upload(token, method, fields, file_field, file_path, attempts=4):
+    """Загрузка файла в Bot API: multipart/form-data на стандартной библиотеке."""
+    boundary = f'----ccr{os.urandom(12).hex()}'
+    filename = os.path.basename(file_path)
+    with open(file_path, 'rb') as f:
+        content = f.read()
+
+    parts = []
+    for key, value in fields.items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'
+            f'{value}\r\n'.encode('utf-8')
+        )
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+        f'filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode('utf-8')
+    )
+    parts.append(content)
+    parts.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+    body = b''.join(parts)
+
+    url = f'{API}/bot{token}/{method}'
+    delay = 2
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            request = urllib.request.Request(
+                url,
+                data=body,
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            )
+            with urllib.request.urlopen(request, timeout=180) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            text = e.read().decode('utf-8', 'replace')
+            if e.code == 429:
+                try:
+                    wait = json.loads(text).get('parameters', {}).get('retry_after', delay)
+                except ValueError:
+                    wait = delay
+                time.sleep(wait)
+                last_error = f'429: {text}'
+                continue
+            if 400 <= e.code < 500:
+                raise SystemExit(f'Telegram API {method} вернул {e.code}: {text}')
+            last_error = f'{e.code}: {text}'
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_error = str(e)
+        if attempt < attempts:
+            time.sleep(delay)
+            delay *= 2
+    raise SystemExit(f'Не удалось загрузить файл через {method}: {last_error}')
 
 
 def api_call(token, method, payload=None, attempts=4):
@@ -221,6 +306,11 @@ def main():
     parser.add_argument('--chat-id', help='Chat id получателя вместо переменной окружения.')
     parser.add_argument('--list-bots', action='store_true',
                         help='Показать ботов, настроенных в окружении, и выйти.')
+    parser.add_argument('--as-pdf', action='store_true',
+                        help='Отрендерить markdown в PDF и отправить файлом (режим по умолчанию '
+                             'для еженедельного отчёта).')
+    parser.add_argument('--document', help='Отправить готовый файл, не рендеря ничего.')
+    parser.add_argument('--caption', help='Подпись к файлу (по умолчанию — заголовок отчёта).')
     parser.add_argument('--plain', action='store_true', help='Слать как есть, без разметки.')
     parser.add_argument('--dry-run', action='store_true',
                         help='Показать разбивку на сообщения и не отправлять.')
@@ -262,14 +352,28 @@ def main():
         print('Найденные chat id:', json.dumps(seen, ensure_ascii=False) or 'нет — напишите боту')
         return
 
-    if not args.path:
-        parser.error('нужен путь к файлу отчёта (или "-" для stdin)')
+    if not args.path and not args.document:
+        parser.error('нужен путь к файлу отчёта (или "-" для stdin), либо --document')
 
     chat_id = resolve_chat_id(args.chat_id, args.bot, token)
+
+    if args.document:
+        if not os.path.isfile(args.document):
+            sys.exit(f'Файл не найден: {args.document}')
+        send_document(token, chat_id, args.document, args.caption)
+        return
+
     text = sys.stdin.read() if args.path == '-' else open(args.path, encoding='utf-8').read()
     text = text.strip()
     if not text:
         sys.exit('Отчёт пустой — отправлять нечего.')
+
+    if args.as_pdf:
+        with tempfile.TemporaryDirectory() as workdir:
+            pdf_path = os.path.join(workdir, pdf_filename(text))
+            render_report_pdf.render_pdf(render_report_pdf.markdown_to_html(text), pdf_path)
+            send_document(token, chat_id, pdf_path, args.caption or report_title(text))
+        return
 
     body = text if args.plain else markdown_to_html(text)
     chunks = split_chunks(body)
